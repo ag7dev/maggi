@@ -1,138 +1,264 @@
 import os
-import json
+import time
+from typing import List
 from transformers import AutoTokenizer, AutoModelForCausalLM, Trainer, TrainingArguments
 from datasets import Dataset
-from colorama import Fore, Style, init
+from colorama import Fore, Style, init, Back
 
-# Initialize colorama for cross-platform compatibility
+# Colorama initialization
 init(autoreset=True)
 
-# Configurations
-MODEL_NAME = "gpt2"  # Base model (can be adjusted)
-INPUT_FOLDER = "input_folder"  # Folder with your text data
-MODEL_SAVE_PATH = "custom_model"  # Path to save the trained model
+# Configuration
+MODEL_NAME = "gpt2"
+INPUT_FOLDER = "input_folder"
+MODEL_SAVE_PATH = "custom_model"
 COMMAND_PREFIX = "/"
+MAX_INPUT_LENGTH = 512
+MAX_GENERATION_LENGTH = 200
 
-def check_and_create_folders():
-    """Checks if the required folders exist, creates them if not."""
+class ColorPrinter:
+    """Helper class for colored console output"""
+    @staticmethod
+    def print_error(msg: str) -> None:
+        print(f"{Fore.BLACK}{Back.RED}[ERROR]{Style.RESET_ALL} {msg}")
+    
+    @staticmethod
+    def print_warning(msg: str) -> None:
+        print(f"{Fore.YELLOW}[!] {msg}{Style.RESET_ALL}")
+    
+    @staticmethod
+    def print_success(msg: str) -> None:
+        print(f"{Fore.GREEN}[✓] {msg}{Style.RESET_ALL}")
+    
+    @staticmethod
+    def print_info(msg: str) -> None:
+        print(f"{Fore.CYAN}[i] {msg}{Style.RESET_ALL}")
+    
+    @staticmethod
+    def print_bold(msg: str) -> None:
+        print(f"{Style.BRIGHT}{msg}{Style.RESET_ALL}")
+
+def show_welcome_banner() -> None:
+    """Displays welcome banner"""
+    print(f"\n{Fore.MAGENTA}{Style.BRIGHT}")
+    print(r"""
+
+  __  __                   _ 
+ |  \/  |                 (_)
+ | \  / | __ _  __ _  __ _ _ 
+ | |\/| |/ _` |/ _` |/ _` | |
+ | |  | | (_| | (_| | (_| | |
+ |_|  |_|\__,_|\__, |\__, |_|
+                __/ | __/ |  
+               |___/ |___/   
+
+    """)
+    print(f"{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}Welcome to Maggi v1.0{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTBLACK_EX}Type '{COMMAND_PREFIX}help' for available commands\n")
+
+def check_and_create_folders() -> None:
+    """Verifies folder structure"""
+    ColorPrinter.print_info("Checking folder structure...")
+    
     if not os.path.exists(INPUT_FOLDER):
-        print(f"{Fore.RED}[ERROR] Input folder '{INPUT_FOLDER}' does not exist. Please create it.")
+        ColorPrinter.print_error(f"Input folder '{INPUT_FOLDER}' not found!")
+        os.makedirs(INPUT_FOLDER)
+        ColorPrinter.print_success(f"Created '{INPUT_FOLDER}' directory")
+        ColorPrinter.print_warning("Please add training data and restart!")
         exit(1)
-    if not os.path.exists(MODEL_SAVE_PATH):
-        print(f"{Fore.RED}[ERROR] Model save path '{MODEL_SAVE_PATH}' does not exist. Creating...")
-        os.makedirs(MODEL_SAVE_PATH)
-        print(f"{Fore.GREEN}[INFO] Created '{MODEL_SAVE_PATH}' directory.")
 
-def load_texts_from_folder(folder_path):
-    """Loads all text data from a folder."""
+    os.makedirs(MODEL_SAVE_PATH, exist_ok=True)
+
+def load_texts_from_folder(folder_path: str) -> List[str]:
+    """Loads text files from folder"""
     texts = []
     for file_name in os.listdir(folder_path):
         file_path = os.path.join(folder_path, file_name)
         if os.path.isfile(file_path) and file_name.endswith(".txt"):
             with open(file_path, "r", encoding="utf-8") as file:
-                texts.append(file.read())
+                content = file.read().strip()
+                if content:
+                    texts.append(content)
+                else:
+                    ColorPrinter.print_warning(f"Skipped empty file: {file_name}")
     return texts
 
-def download_and_prepare_model():
-    """Downloads and prepares the base model if not found."""
-    if not os.path.exists(MODEL_SAVE_PATH):
-        print(f"{Fore.YELLOW}[INFO] Base model not found. Downloading...")
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        tokenizer.add_special_tokens({'pad_token': tokenizer.eos_token})  # Add pad_token
-        model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
-        model.resize_token_embeddings(len(tokenizer))  # Resize tokenizer to model
-        os.makedirs(MODEL_SAVE_PATH, exist_ok=True)
+def initialize_model() -> tuple:
+    """Initializes tokenizer and model"""
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_SAVE_PATH)
+        model = AutoModelForCausalLM.from_pretrained(MODEL_SAVE_PATH)
+        
+        # Special tokens configuration
+        if not tokenizer.pad_token:
+            tokenizer.add_special_tokens({'pad_token': tokenizer.eos_token})
+            model.resize_token_embeddings(len(tokenizer))
+        
+        return tokenizer, model
+    except Exception as e:
+        ColorPrinter.print_error(f"Model initialization failed: {str(e)}")
+        exit(1)
+
+def validate_training_data(texts: List[str]) -> bool:
+    """Validates if training data contains conversational patterns"""
+    if len(texts) < 10:
+        ColorPrinter.print_warning("Low training data (recommended: 10+ quality conversations)")
+        return False
+    
+    conversation_count = sum(1 for text in texts if "\n" in text)  # Simple conversation detection
+    if conversation_count < 5:
+        ColorPrinter.print_warning("Few conversation-like structures detected")
+    
+    return True
+
+def train_model() -> None:
+    """Trains the model"""
+    ColorPrinter.print_bold(f"\n{Fore.MAGENTA}=== TRAINING STARTED ==={Style.RESET_ALL}")
+    start_time = time.time()
+    
+    try:
+        texts = load_texts_from_folder(INPUT_FOLDER)
+        if not texts:
+            ColorPrinter.print_error("No training data found!")
+            return
+
+        if not validate_training_data(texts):
+            ColorPrinter.print_warning("Training data quality might affect results")
+
+        dataset = Dataset.from_dict({"text": texts})
+        tokenizer, model = initialize_model()
+
+        # Tokenization
+        def tokenize_function(examples):
+            return tokenizer(
+                examples["text"],
+                truncation=True,
+                padding="max_length",
+                max_length=128,
+                return_tensors="pt"
+            )
+
+        tokenized_datasets = dataset.map(tokenize_function, batched=True, remove_columns=["text"])
+
+        # Training configuration
+        training_args = TrainingArguments(
+            output_dir=MODEL_SAVE_PATH,
+            overwrite_output_dir=True,
+            num_train_epochs=3,
+            per_device_train_batch_size=4,
+            logging_steps=100,
+            save_steps=500,
+            logging_dir='./logs',
+            report_to="none"
+        )
+
+        # Initialize trainer
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=tokenized_datasets,
+        )
+
+        # Training
+        trainer.train()
+        trainer.save_model(MODEL_SAVE_PATH)
         tokenizer.save_pretrained(MODEL_SAVE_PATH)
-        model.save_pretrained(MODEL_SAVE_PATH)
-        print(f"{Fore.GREEN}[SUCCESS] Base model downloaded and saved.")
-    else:
-        print(f"{Fore.GREEN}[INFO] Base model already exists.")
+        
+        training_time = time.time() - start_time
+        ColorPrinter.print_success(
+            f"Training completed successfully in {training_time:.2f}s"
+        )
+        
+        # After training verification
+        ColorPrinter.print_info("Testing model with sample input...")
+        test_input = "Hello"  # Simple test prompt
+        inputs = tokenizer(test_input, return_tensors="pt")
+        outputs = model.generate(**inputs, max_length=50)
+        response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        ColorPrinter.print_info(f"Sample response: {response}")
+        
+    except Exception as e:
+        ColorPrinter.print_error(f"Training failed: {str(e)}")
 
-def train_model():
-    """Trains the model with text data from the input folder."""
-    print(f"{Fore.CYAN}[INFO] Training started...")
+def show_help() -> None:
+    """Displays help information"""
+    help_text = f"""
+    {Fore.CYAN}Available commands:{Style.RESET_ALL}
+    {COMMAND_PREFIX}help    - Show this help
+    {COMMAND_PREFIX}exit    - Exit the program
+    {COMMAND_PREFIX}retrain - Retrain the model
+    """
+    print(help_text)
 
-    # Load and combine text data
-    texts = load_texts_from_folder(INPUT_FOLDER)
-    if not texts:
-        print(f"{Fore.RED}[ERROR] No text data found. Please add files to the input folder.")
+def chat_with_model() -> None:
+    """Main chat loop"""
+    ColorPrinter.print_info("Loading model for conversation...")
+    try:
+        tokenizer, model = initialize_model()
+    except Exception as e:
+        ColorPrinter.print_error(f"Failed to load model: {str(e)}")
         return
 
-    dataset = Dataset.from_dict({"text": texts})
-
-    # Load tokenizer and model
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_SAVE_PATH)
-    tokenizer.add_special_tokens({'pad_token': tokenizer.eos_token})  # Add pad_token
-    model = AutoModelForCausalLM.from_pretrained(MODEL_SAVE_PATH)
-    model.resize_token_embeddings(len(tokenizer))  # Resize tokenizer to model
-
-    # Tokenization function
-    def tokenize_function(examples):
-        encoding = tokenizer(examples["text"], truncation=True, padding="max_length", max_length=128)
-        encoding["labels"] = encoding["input_ids"]  # Set target values for training
-        return encoding
-
-    tokenized_datasets = dataset.map(tokenize_function, batched=True, remove_columns=["text"])
-
-    # Training arguments
-    training_args = TrainingArguments(
-        output_dir=MODEL_SAVE_PATH,
-        overwrite_output_dir=True,
-        num_train_epochs=3,
-        per_device_train_batch_size=4,
-        save_steps=10_000,
-        save_total_limit=2,
-        logging_dir='./logs',
-    )
-
-    # Initialize trainer
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=tokenized_datasets,
-    )
-
-    # Train the model
-    trainer.train()
-    trainer.save_model(MODEL_SAVE_PATH)
-    tokenizer.save_pretrained(MODEL_SAVE_PATH)
-    print(f"{Fore.GREEN}[SUCCESS] Training completed and model saved.")
-
-def chat_with_model():
-    """Interacts with the trained model."""
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_SAVE_PATH)
-    model = AutoModelForCausalLM.from_pretrained(MODEL_SAVE_PATH)
-
-    print(f"{Fore.CYAN}[INFO] Chat started! Type your text (\"/exit\" to exit):")
+    ColorPrinter.print_success("Ready for conversation!")
+    print(f"\n{Fore.LIGHTBLACK_EX}Type your message or '{COMMAND_PREFIX}help' for commands\n")
+    
     while True:
-        user_input = input(f"{Fore.YELLOW}You: ")
+        try:
+            user_input = input(f"{Fore.YELLOW}{Style.BRIGHT}You ➜ {Style.RESET_ALL}")
+            
+            if user_input.startswith(COMMAND_PREFIX):
+                command = user_input[len(COMMAND_PREFIX):].strip().lower()
+                if command == "exit":
+                    break
+                elif command == "retrain":
+                    train_model()
+                    tokenizer, model = initialize_model()
+                elif command == "help":
+                    show_help()
+                else:
+                    ColorPrinter.print_warning(f"Unknown command: '{command}'")
+                continue
 
-        if user_input.startswith(COMMAND_PREFIX):
-            command = user_input[len(COMMAND_PREFIX):].strip()
-            if command == "exit":
-                print(f"{Fore.GREEN}[INFO] Chat ended.")
-                break
-            elif command == "retrain":
-                train_model()
-                print(f"{Fore.GREEN}[INFO] Model retrained.")
-            else:
-                print(f"{Fore.RED}[ERROR] Unknown command: {command}")
-            continue
-
-        # Tokenize the input
-        inputs = tokenizer(user_input, return_tensors="pt", truncation=True, padding=True, max_length=128)
-        attention_mask = inputs['attention_mask']
-
-        # Generate model response
-        outputs = model.generate(inputs['input_ids'], attention_mask=attention_mask, max_length=200, num_return_sequences=1, pad_token_id=tokenizer.eos_token_id, no_repeat_ngram_size=2)
-
-        # Decode response
-        response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        print(f"{Fore.GREEN}AI: {response}")
-
+            # Input validation
+            if not user_input.strip():
+                continue
+                
+            # Response generation
+            inputs = tokenizer(
+                user_input,
+                return_tensors="pt",
+                truncation=True,
+                max_length=MAX_INPUT_LENGTH
+            )
+            
+            outputs = model.generate(
+                inputs.input_ids,
+                attention_mask=inputs.attention_mask,
+                max_length=MAX_GENERATION_LENGTH,
+                pad_token_id=tokenizer.eos_token_id,
+                no_repeat_ngram_size=2,
+                temperature=0.7,
+                do_sample=True
+            )
+            
+            response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+            print(f"\n{Fore.GREEN}AI ➜ {Style.RESET_ALL}{response}\n")
+            
+        except KeyboardInterrupt:
+            print("\n")
+            ColorPrinter.print_warning("Conversation ended")
+            break
+        except Exception as e:
+            ColorPrinter.print_error(f"Generation error: {str(e)}")
 
 if __name__ == "__main__":
-    check_and_create_folders()  # Check if folders exist
-    download_and_prepare_model()  # Prepare base model
-    train_model()  # Train the model
-    chat_with_model()  # Start the chat interaction
+    show_welcome_banner()
+    check_and_create_folders()
+    
+    # Automatic training if no model exists
+    if not os.listdir(MODEL_SAVE_PATH):
+        ColorPrinter.print_warning("No trained model found!")
+        train_model()
+    
+    chat_with_model()
