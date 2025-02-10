@@ -84,6 +84,32 @@ def load_texts_from_folder(folder_path: str) -> List[str]:
                     ColorPrinter.print_warning(f"Skipped empty file: {file_name}")
     return texts
 
+def download_and_prepare_model():
+    """Downloads and prepares the base model if not found."""
+    # Check if model directory contains essential files
+    required_files = ["config.json", "pytorch_model.bin", "vocab.json"]
+    model_exists = all(os.path.exists(os.path.join(MODEL_SAVE_PATH, f)) for f in required_files)
+    
+    if not model_exists:
+        ColorPrinter.print_warning("Base model not found, downloading...")
+        try:
+            # Create folder if not exists
+            os.makedirs(MODEL_SAVE_PATH, exist_ok=True)
+            
+            tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+            tokenizer.add_special_tokens({'pad_token': tokenizer.eos_token})
+            model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
+            model.resize_token_embeddings(len(tokenizer))
+            
+            tokenizer.save_pretrained(MODEL_SAVE_PATH)
+            model.save_pretrained(MODEL_SAVE_PATH)
+            ColorPrinter.print_success("Successfully downloaded and saved base model")
+        except Exception as e:
+            ColorPrinter.print_error(f"Download failed: {str(e)}")
+            exit(1)
+    else:
+        ColorPrinter.print_info("Base model already present in directory")
+
 def initialize_model() -> tuple:
     """Initializes tokenizer and model"""
     try:
@@ -254,11 +280,15 @@ def chat_with_model() -> None:
 
 if __name__ == "__main__":
     show_welcome_banner()
-    check_and_create_folders()
+    check_and_create_folders()  # Muss zuerst kommen!
+    download_and_prepare_model()
     
-    # Automatic training if no model exists
-    if not os.listdir(MODEL_SAVE_PATH):
-        ColorPrinter.print_warning("No trained model found!")
+    # Check if training is needed (modified logic)
+    train_data_present = len(os.listdir(INPUT_FOLDER)) > 0
+    model_files_present = len(os.listdir(MODEL_SAVE_PATH)) > 3  # Mindestens 3 Dateien
+    
+    if train_data_present and not model_files_present:
+        ColorPrinter.print_warning("Training data found but no trained model - starting training!")
         train_model()
     
     chat_with_model()
